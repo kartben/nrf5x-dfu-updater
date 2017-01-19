@@ -2,7 +2,7 @@
   "name": "nrf5x-dfu-updater",
   "version": "1.0.0",
   "description": "Nodejs nrf5x BLE DFU updater",
-  "main": "updater.js",
+  "main": "update.js",
   "dependencies": {
     "async": "^1.5.2",
     "bleno": "^0.4.0",
