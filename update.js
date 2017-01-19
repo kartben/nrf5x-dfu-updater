@@ -8,150 +8,25 @@ var progress = require('progress');
 var binary   = require('./binary.js');
 var cproc    = require('child_process');
 var readline = require('readline');
-var argv     = require('yargs')
-               .demand('f')
-               .alias('f', 'file')
-               .describe('f', 'path to firmware *.bin')
-               .alias('a', 'address')
-               .describe('a', 'address of node to reprogram in XX:XX:XX:XX:XX:XX format')
-               .boolean('l')
-               .alias('l', 'advertise')
-               .describe('l', 'reprogram a master node (aka send an advertisement)')
-               .describe('addresses', 'path to a file of node addresses to reprogram')
-               .help('h')
-               .alias('h', 'help')
-               .argv
 
 var DFU_SERVICE     = '000015301212efde1523785feabcd123'
 var DFU_CTRLPT_CHAR = '000015311212efde1523785feabcd123'
 var DFU_PKT_CHAR    = '000015321212efde1523785feabcd123'
 var ATT_MTU         = 23;
 
-
-function validate_mac (mac) {
-  try {
-    var m = mac.match(/[0-9a-fA-F][^:]/g).join('').toLowerCase();
-    if (m.length != 12) {
-      return undefined;
-    }
-  } catch (e) {
-    return undefined;
-  }
-
-  return m;
-}
-
-// Check that -f was passed a bin file
-var extension = argv.f.slice(argv.f.length-3, argv.length);
-if (extension != 'bin') {
-  console.log('Firmware must be in .bin format.');
-  process.exit(1);
-}
-
-// Decide if we should reprogram a single device or a list of devices
-if (argv.a != undefined) {
-  // Look for a single device
-  var mac = validate_mac(argv.a);
-  if (mac === undefined) {
-    console.log(argv.a + ' is not a valid address');
-    process.exit(1);
-  }
-
-  // Updater handles the actual upload
-  var updater = new Updater(mac, argv.f, argv.l);
-
-
-} else {
-  // Go through a file of nodes to update
-
-  var lines = fs.readFileSync(argv.addresses).toString().split("\n");
-
-  var ops = [];
-
-  var run_all_addrs = function () {
-    async.series(ops, function () {
-      process.exit(0);
-    });
-  }
-
-  var process_addr_line = function (line, cb) {
-    var mac = validate_mac(line);
-    if (mac != undefined) {
-      console.log(mac)
-
-      ops.push(function (callback) {
-        var updater = new Updater(mac, argv.f, argv.l, callback);
-      });
-
-
-
-    } else {
-      console.log(line + ' is not a valid address.');
-
-    }
-    cb();
-  }
-
-  async.each(lines, process_addr_line, run_all_addrs);
-
-
-
-
-
-
-  // .forEach(function(line, index, arr) {
-  //   if (index === arr.length - 1 && line === "") { return; }
-
-  //   var mac = validate_mac(line);
-  //   if (mac != undefined) {
-  //     console.log(mac)
-
-  //     var updater = new Updater(mac, argv.f, argv.l);
-  //   } else {
-  //     console.log(line + ' is not a valid address.');
-  //   }
-
-  // });
-
-  // var addr_file = readline.createInterface({
-  //   input: fs.createReadStream(argv.addresses)
-  // });
-
-  // addr_file.on('line', function (line) {
-  //   if (line === '') return;
-
-  //   var mac = validate_mac(line);
-  //   if (mac != undefined) {
-  //     console.log(mac)
-
-  //     var updater = new Updater(mac, argv.f, argv.l);
-  //   } else {
-  //     console.log(line + ' is not a valid address.');
-  //   }
-  // });
-
-}
-
-
-
-
-
-
-function Updater(mac, fname, adv, done_cb) {
+function Updater(device, fname, done_cb) {
 
   var self = this;
 
-  this.advertise = adv;
   this.fileBuffer = null;
-  this.targetMAC = mac;
-  this.targetDevice = null;
+  this.targetDevice = device;
   this.initPkt = null;
   this.targetIsApp = 0;
   this.ctrlptChar = null;
   this.pktChar = null;
   this.progressBar = null;
 
-  console.log('Trying to reprogram ' + mac);
+  console.log('Trying to reprogram ' + device.advertisement.localName);
 
   async.series([
     // read firmware bin file and prepare related parameters
@@ -163,68 +38,12 @@ function Updater(mac, fname, adv, done_cb) {
       });
     },
     function(callback) {
-      if (self.advertise) {
-        child = cproc.fork('advertise.js', ['-a ' + self.targetMAC]);
-        child.on('close', function() {
-          console.log('done advertising');
-          callback(null, 1);
-        });
-      } else {
-        callback(null, 1);
-      }
-    },
-    function(callback) {
-      // start scanning BLE devices
-      // noble is required here to avoid collision with bleno in the other app
-      noble = require('noble');
-
-      try {
-        noble.startScanning([], true);
-        callback(null, 2);
-      } catch (e) {
-        noble.on('stateChange', function(state) {
-          if (state === 'poweredOn') {
-            console.log('starting scan...');
-            noble.startScanning([], true);
-          } else {
-            noble.stopScanning();
-          }
-          callback(null, 2);
-        });
-      }
-    },
-    function(callback) {
-      // when we discover devices
-      noble.on('discover', discoverDevice);
-      callback(null, 3);
+      dfuStart();
     }
   ],
   function(err, results) {
     if (err) throw err;
   });
-
-  // when a scan discovers a device, check if its MAC matches
-  function discoverDevice(peripheral) {
-    //console.log('discovered device: ' + peripheralToString(peripheral));
-    if (peripheral.id == self.targetMAC) {
-      noble.stopScanning();
-      console.log('found requested peripheral: ' + peripheralToString(peripheral));
-      self.targetDevice = peripheral;
-      self.targetDevice.once('disconnect', function() {
-        console.log('disconnected from ' + peripheralToString(peripheral));
-        if (!self.targetIsApp) {
-          if (done_cb !== undefined) {
-            done_cb();
-          } else {
-            process.exit();
-          }
-        } else {
-          noble.startScanning([], true);
-        }
-      });
-      dfuStart();
-    }
-  }
 
   function ctrlResponse(data, isNotify) {
     if(data.length !== 3) {
@@ -328,12 +147,16 @@ function Updater(mac, fname, adv, done_cb) {
 
   function dfuStart() {
     async.series([
-    // Connect to target
+    // Connect to target (if need be)
     function(callback) {
-      self.targetDevice.connect(function(err) {
-        console.log('connected to ' + peripheralToString(self.targetDevice));
-        callback(err, 1);
-      });
+      if(self.targetDevice.state === 'disconnected') {
+        self.targetDevice.connect(function(err) {
+          console.log('connected to ' + peripheralToString(self.targetDevice));
+          callback(err, 1);
+        });
+      } else {
+        callback()
+      }
     },
     // Get DFU Service
     function(callback) {
@@ -454,3 +277,5 @@ function peripheralToString(peripheral) {
   return peripheral.id.match(/../g).join(':') + ' '
     + peripheral.advertisement.localName;
 }
+
+module.exports = Updater;
